@@ -38,16 +38,6 @@ function getCache() {
 /** Current indexer lag in ledgers (latestChainLedger - lastIndexedLedger). Reset after each poll. */
 export let indexerLedgerLag = 0;
 
-/** Threshold in ledgers above which a warning is logged. Configurable via INDEXER_LAG_WARN_THRESHOLD. */
-function getLagWarnThreshold(): number {
-  return parseInt(process.env.INDEXER_LAG_WARN_THRESHOLD ?? '100', 10);
-}
-
-/** Configurable finality margin delays treating the most recent N ledgers as immutable. */
-function getFinalityMargin(): number {
-  return parseInt(process.env.INDEXER_FINALITY_MARGIN ?? '10', 10);
-}
-
 // ─── Payload normalisation ────────────────────────────────────────────────────
 //
 // The Soroban contract emits events with snake_case field names but some events
@@ -216,7 +206,7 @@ export async function indexEvents(): Promise<void> {
   );
 
   const lastIndexed = fetchLastIndexedLedger();
-  const margin = getFinalityMargin();
+  const margin = config.indexer.finalityMargin;
   const fromLedger = Math.max(0, lastIndexed > margin ? lastIndexed - margin : 0);
   span.setAttribute('indexer.ledger_start', fromLedger);
 
@@ -237,7 +227,7 @@ export async function indexEvents(): Promise<void> {
 
   const lagAfterPoll = Math.max(0, response.latestLedger - (lastIndexed > 0 ? lastIndexed - 1 : response.latestLedger));
   indexerLedgerLag = lagAfterPoll;
-  const threshold = getLagWarnThreshold();
+  const threshold = config.indexer.lagWarnThreshold;
   if (lagAfterPoll > threshold) {
     logger.warn(`[indexer] ledger lag=${lagAfterPoll} exceeds threshold=${threshold}`);
   }
