@@ -10,6 +10,9 @@ import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { revokeToken, isTokenRevoked } from '../services/tokenBlocklist';
 import { signJwt, verifyJwt } from '../utils/jwt';
+import { getValidatorByWallet } from '../services/indexer';
+import { insertAuditLog } from '../db';
+import { recordAuthFailure, resetAuthFailures } from '../middleware/authFailureLockout';
 import { incAuthFailure } from '../middleware/metrics';
 
 // ─── Schema ────────────────────────────────────────────────────────────────────
@@ -32,6 +35,55 @@ export const tokenSchema = z.object({
 export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
 }).strict();
+
+// ─── Role resolution ──────────────────────────────────────────────────────────
+
+/**
+ * Re-derive the effective role for `account` from authoritative state.
+ *
+ * Priority:
+ *   1. `admin`     — wallet is in config.adminWallet / config.adminWallets
+ *   2. `validator` — wallet is a registered, non-revoked validator (DB)
+ *   3. `requestedRole` — the role claimed in the token (scout or player),
+ *      defaulting to 'player' if absent or unrecognised.
+ *
+ * This function is used by both `postToken` (initial grant) and `postRefresh`
+ * (rotation) so that a demoted admin or revoked validator cannot extend their
+ * elevated access beyond the current state.
+ */
+export async function resolveEffectiveRole(
+  account: string,
+  requestedRole: string | undefined,
+): Promise<string> {
+  // Admin check (synchronous, config-based — no DB required)
+  const isAdmin =
+    (config.adminWallet && account === config.adminWallet) ||
+    config.adminWallets.includes(account);
+  if (isAdmin) return 'admin';
+
+  // Validator check (async, DB-backed)
+  try {
+    const validatorRow = await getValidatorByWallet(account);
+    if (validatorRow && validatorRow.revoked_at === null) {
+      // Only grant validator if that's what the token is asking for; a scout
+      // who is also a registered validator keeps their chosen role.
+      if (requestedRole === 'validator') return 'validator';
+    }
+  } catch (err) {
+    // Non-fatal: if the DB is unreachable, the refresh still succeeds but the
+    // validator role cannot be confirmed, so it is not granted. An unavailable
+    // DB should not lock out all token refreshes, nor extend unverified access.
+    logger.warn('[auth] resolveEffectiveRole: validator check failed, validator role not granted', {
+      account,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Fallback: honour the requested scout/player role, defaulting to 'player'.
+  // 'validator' is only ever granted by the verified check above.
+  const allowed = new Set(['scout', 'player']);
+  return allowed.has(requestedRole ?? '') ? (requestedRole as string) : 'player';
+}
 
 // ─── Token issuance helpers ────────────────────────────────────────────────────
 
@@ -93,7 +145,7 @@ export function getChallenge(req: Request, res: Response, _next: NextFunction): 
 // ─── POST /auth/token ──────────────────────────────────────────────────────────
 
 /** POST /auth/token  { transaction: "<signed XDR>", role?: "validator" } */
-export function postToken(req: Request, res: Response, _next: NextFunction): void {
+export async function postToken(req: Request, res: Response, next: NextFunction): Promise<void> {
 try {
     const parsed = tokenSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -121,6 +173,9 @@ try {
     const { token: accessToken, expiresAt } = issueAccessToken(account, effectiveRole);
     const { token: refreshToken } = issueRefreshToken(account, effectiveRole);
 
+    // Step 4: reset any per-account failure counter on successful exchange.
+    void resetAuthFailures(account);
+
     res.json({ success: true, token: accessToken, accessToken, refreshToken, account, expiresAt });
   } catch (err) {
     // Sep10Error is thrown by verifyChallenge for authentication failures
@@ -137,6 +192,14 @@ try {
         reason: err.message,
       });
       if (mapping.httpStatus === 401) incAuthFailure('sep10_invalid');
+      // Record the failure for per-account backoff tracking
+      if (mapping.httpStatus === 401 && attemptedWallet) {
+        void recordAuthFailure(
+          attemptedWallet,
+          extractClientIp(req) ?? 'unknown',
+          req.correlationId,
+        );
+      }
       res.status(mapping.httpStatus).json({
         success: false,
         error: mapping.clientMessage,
@@ -231,9 +294,36 @@ try {
     const expiresAtSeconds = payload.exp ?? Math.floor(Date.now() / 1000) + config.jwtRefreshTtlSeconds;
     await revokeToken(jti, expiresAtSeconds);
 
-    // Issue new pair.
-    const { token: newAccessToken, expiresAt } = issueAccessToken(account, role);
-    const { token: newRefreshToken } = issueRefreshToken(account, role);
+    // Re-derive role from authoritative state (config for admin, DB for validator).
+    // This ensures a demoted admin or revoked validator cannot perpetuate
+    // their elevated access beyond the current token rotation window.
+    const claimedRole = role;
+    const effectiveRole = await resolveEffectiveRole(account, claimedRole);
+
+    if (effectiveRole !== claimedRole) {
+      logger.info('[auth] auth_role_downgraded', {
+        account,
+        previousRole: claimedRole ?? 'unknown',
+        newRole: effectiveRole,
+        jti,
+      });
+      // Emit a structured audit event for the downgrade
+      try {
+        await insertAuditLog({
+          action: 'auth_role_downgraded',
+          adminWallet: account,
+          queryParams: { previousRole: claimedRole ?? null, newRole: effectiveRole },
+          eventSource: 'postRefresh',
+          createdAt: new Date().toISOString(),
+        });
+      } catch {
+        // Non-fatal: audit log failure must not block token issuance
+      }
+    }
+
+    // Issue new pair with the re-derived (potentially downgraded) role.
+    const { token: newAccessToken, expiresAt } = issueAccessToken(account, effectiveRole);
+    const { token: newRefreshToken } = issueRefreshToken(account, effectiveRole);
 
     res.json({
       success: true,
