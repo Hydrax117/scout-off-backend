@@ -12,6 +12,7 @@ import {
   insertBookmark,
   deleteBookmark,
   getBookmarkedPlayersWithDetails,
+  countBookmarkedPlayers,
   insertBookmarkFolder,
   getBookmarkFoldersByScout,
   getBookmarkFolderById,
@@ -22,6 +23,7 @@ import {
   PlayerRow,
 } from '../db';
 import { getTierMeta } from '../utils/tier';
+import { DEFAULT_PAGE_SIZE, clampPageSize } from '../utils/pagination';
 import { logger } from '../utils/logger';
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -162,8 +164,16 @@ export async function listBookmarks(
 ): Promise<void> {
   const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
 
+  const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+  const pageSize = clampPageSize(req.query.pageSize ?? DEFAULT_PAGE_SIZE);
+  const offset = (page - 1) * pageSize;
+
   // Single JOIN query — replaces the previous per-bookmark getPlayerById() loop.
-  const rows = await getBookmarkedPlayersWithDetails(req.params.wallet as string, folderId);
+  const rows = await getBookmarkedPlayersWithDetails(req.params.wallet as string, folderId, {
+    limit: pageSize,
+    offset,
+  });
+  const total = await countBookmarkedPlayers(req.params.wallet as string, folderId);
 
   const enriched = rows.map((row) => ({
     ...serializePlayer(row),
@@ -172,7 +182,7 @@ export async function listBookmarks(
     note: row.bookmark_note,
   }));
 
-  res.json({ success: true, data: enriched });
+  res.json({ success: true, data: enriched, meta: { page, pageSize, total } });
 }
 
 // ─── Bookmark folder handlers ─────────────────────────────────────────────────────
