@@ -21,6 +21,7 @@ import {
 import { closeRedisClients } from "./services/redis";
 import { runTierDivergenceCheck, getTierDivergenceTotal } from "./services/tierDivergenceJob";
 import { setTierDivergenceGetter } from "./middleware/metrics";
+import { incUnhandledRejections } from "./middleware/metrics";
 import { drainAllSessions, setAcceptingSseSessions } from "./routes/events";
 import http from "http";
 import { applyHttpTimeouts } from "./httpServer";
@@ -134,7 +135,7 @@ async function startServer() {
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
-  // Poll for IPFS retries every 30 seconds
+  // Poll for IPFS retries
   const retryPins = withJobTracking(async () => {
     try {
       await retryPendingPins();
@@ -143,7 +144,11 @@ async function startServer() {
     }
   });
 
-  const retryInterval = setInterval(retryPins, 30_000);
+  // Run once at startup for consistency with the reconcile and divergence
+  // jobs, then schedule the interval. The interval is configurable via
+  // IPFS_PIN_RETRY_INTERVAL_MS (default: 30000, min: 5000).
+  retryPins();
+  const retryInterval = setInterval(retryPins, config.ipfsPinRetryIntervalMs);
 
   // Scheduled reconciliation of pending pins against Pinata & IPFS gateways
   const reconcilePins = withJobTracking(async () => {
@@ -283,6 +288,7 @@ async function startServer() {
 
   process.on("unhandledRejection", (reason: unknown) => {
     unhandledRejectionsTotal += 1;
+    incUnhandledRejections();
     const err = reason instanceof Error ? reason : new Error(String(reason));
     logger.error(
       `Unhandled promise rejection (scout_off_unhandled_rejections_total=${unhandledRejectionsTotal}):`,

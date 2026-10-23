@@ -312,6 +312,8 @@ env:
   ADMIN_ACTION_TTL_MS: "3600000"
   # Player cache TTL in ms. Default: 60000 (1 min).
   PLAYER_CACHE_TTL_MS: "60000"
+  # IPFS pending-pin retry interval in ms. Default: 30000 (30s). Min: 5000.
+  IPFS_PIN_RETRY_INTERVAL_MS: "30000"
   # Reindex tuning. Batch sizes are in ledgers (1-10000); delays in ms.
   REINDEX_BATCH_SIZE: "100"
   REINDEX_BATCH_DELAY_MS: "50"
