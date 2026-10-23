@@ -127,6 +127,7 @@ const corsOptions: CorsOptions = {
   exposedHeaders: [
     'ETag',
     'X-Correlation-ID',
+    'X-Trace-Id',
     'X-Response-Time',
     'X-API-Version',
     'API-Version',
