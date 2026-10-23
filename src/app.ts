@@ -1,8 +1,8 @@
-import express from 'express';
+import express, { RequestHandler } from 'express';
 import cors, { CorsOptions } from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import config from './config';
+import config, { API_PREFIX, API_V1_PREFIX, API_V2_PREFIX } from './config';
 import authRoutes from './routes/auth';
 import playerRoutes from './routes/player';
 import scoutRoutes from './routes/scout';
@@ -16,10 +16,8 @@ import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
 import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
-import { API_PREFIX, API_V1_PREFIX, API_V2_PREFIX } from './config';
 import { mountGraphQL } from './graphql';
-import { createPersistedOperationsPlugin } from './graphql/persisted-operations';
-import { loadPersistedOperationsFromFile } from './graphql/persisted-operations';
+import { createPersistedOperationsPlugin, loadPersistedOperationsFromFile } from './graphql/persisted-operations';
 import { ErrorCode } from './utils/errorCodes';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { ipReputationMiddleware } from './middleware/ipReputation';
@@ -136,6 +134,7 @@ const corsOptions: CorsOptions = {
     'Location',
     'Retry-After',
     'X-RateLimit-Reputation-Limit',
+    'Idempotent-Replayed',
   ],
   // credentials cannot be used with a wildcard origin (CORS spec); only enable
   // it when we are using an explicit allowlist
@@ -250,6 +249,25 @@ app.use(metricsMiddleware);
 // IP reputation layer — runs after metrics so the finish hook in
 // metricsMiddleware is registered first, keeping score increments in order.
 app.use(ipReputationMiddleware);
+
+// Operational endpoints must never be cached by a CDN or proxy, otherwise load
+// balancers and monitoring could see a stale health status during an outage.
+const noStore: RequestHandler = (_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+};
+app.use(
+  [
+    '/health',
+    '/ready',
+    '/metrics',
+    '/version',
+    `${API_PREFIX}/health/dependencies`,
+    `${API_V1_PREFIX}/health/dependencies`,
+    `${API_V2_PREFIX}/health/dependencies`,
+  ],
+  noStore,
+);
 
 app.get('/version', (_req, res) => {
   res.json(getVersionInfo());
