@@ -808,6 +808,19 @@ const config = {
     sampleSize: parseNumericEnv('TIER_DIVERGENCE_SAMPLE_SIZE', process.env.TIER_DIVERGENCE_SAMPLE_SIZE, 100, { min: 1, integer: true }),
   },
 
+  // ── Sensitive-read auditing (#1531) ────────────────────────────────────
+  // Records admin/owner reads of sensitive data (audit trail, exports,
+  // webhook deliveries, notes, API-key listings) in the hash-chained audit
+  // log. Enabled by default in production; set AUDIT_READS_ENABLED=false to
+  // turn it off if audit volume becomes a problem.
+  auditReads: {
+    enabled: (() => {
+      const raw = process.env.AUDIT_READS_ENABLED;
+      if (raw === undefined || raw.trim() === '') return nodeEnv === 'production';
+      return ['true', '1', 'yes'].includes(raw.trim().toLowerCase());
+    })(),
+  },
+
   // ── Audit-log hash-chain verification (#1539) ──────────────────────────
   // The scheduled job verifies new audit rows incrementally once an hour and
   // walks the whole chain weekly, catching edits to already-verified rows.
